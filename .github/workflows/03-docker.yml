@@ -34,7 +34,7 @@ jobs:
       digest: ${{ steps.build.outputs.digest }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # Buildx = build engine รุ่นใหม่ รองรับ cache และ multi-platform
       - name: ตั้งค่า Docker Buildx

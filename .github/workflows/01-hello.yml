@@ -30,7 +30,7 @@ jobs:
     steps:
       # ---- (3) STEP แบบ "uses" : เรียกใช้ Action ที่คนอื่นเขียนไว้ -----------
       - name: ดึงโค้ดลงมาไว้บน runner
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # ---- (4) STEP แบบ "run" : สั่ง shell command ตรง ๆ --------------------
       - name: ทักทาย
