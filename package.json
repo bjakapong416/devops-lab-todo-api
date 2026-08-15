@@ -20,7 +20,7 @@
     "format": "prettier --write ."
   },
   "dependencies": {
-    "express": "^4.21.2",
+    "express": "^5.2.1",
     "pg": "^8.13.1"
   },
   "devDependencies": {
