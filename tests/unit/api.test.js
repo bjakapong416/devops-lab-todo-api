@@ -66,3 +66,17 @@ describe('CRUD /api/todos', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('GET /api/todos/stats', () => {
+  test('นับจำนวนรายการทั้งหมด/เสร็จแล้ว/ค้างอยู่ได้ถูกต้อง', async () => {
+    await request(app).post('/api/todos').send({ title: 'อันแรก' });
+    const second = await request(app).post('/api/todos').send({ title: 'อันสอง' });
+    await request(app)
+      .put(`/api/todos/${second.body.data.id}`)
+      .send({ title: 'อันสอง', done: true });
+
+    const res = await request(app).get('/api/todos/stats');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ total: 2, done: 1, pending: 1 });
+  });
+});

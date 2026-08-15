@@ -12,6 +12,16 @@ todosRouter.get('/', async (_req, res, next) => {
   }
 });
 
+todosRouter.get('/stats', async (_req, res, next) => {
+  try {
+    const items = await store.list();
+    const done = items.filter((item) => item.done).length;
+    res.json({ data: { total: items.length, done, pending: items.length - done } });
+  } catch (err) {
+    next(err);
+  }
+});
+
 todosRouter.get('/:id', async (req, res, next) => {
   try {
     const item = await store.get(req.params.id);
