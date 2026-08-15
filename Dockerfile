@@ -10,7 +10,7 @@
 ###############################################################################
 
 ########################  1) deps  ############################################
-FROM node:22-alpine AS deps
+FROM node:26-alpine AS deps
 WORKDIR /app
 # คัดลอกเฉพาะไฟล์ manifest ก่อน เพื่อให้ Docker cache ชั้นนี้ไว้ได้
 # ถ้า package.json ไม่เปลี่ยน ขั้น npm ci จะถูกใช้ cache ทันที
@@ -24,13 +24,13 @@ COPY . .
 RUN npm run lint && npm test
 
 ########################  3) prod-deps  #######################################
-FROM node:22-alpine AS prod-deps
+FROM node:26-alpine AS prod-deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 ########################  4) runtime  #########################################
-FROM node:22-alpine AS runtime
+FROM node:26-alpine AS runtime
 ENV NODE_ENV=production \
     PORT=3000
 WORKDIR /app
