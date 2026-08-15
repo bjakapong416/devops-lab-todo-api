@@ -1,0 +1,44 @@
+# ใช้บนเครื่องเซิร์ฟเวอร์ (staging/production)
+# ต่างจากไฟล์ dev ตรงที่ "ไม่ build" แต่ pull image ที่ CI สร้างไว้แล้วจาก GHCR
+#
+# ต้องมีตัวแปรแวดล้อมเหล่านี้ (ปกติมาจากไฟล์ .env ข้าง ๆ ไฟล์นี้):
+#   IMAGE            เช่น ghcr.io/USERNAME/devops-lab-todo-api
+#   TAG              เช่น sha-a1b2c3d หรือ 1.2.3
+#   POSTGRES_PASSWORD
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?ต้องกำหนด POSTGRES_PASSWORD}
+      POSTGRES_DB: todos
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d todos']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: always
+
+  api:
+    image: ${IMAGE:?ต้องกำหนด IMAGE}:${TAG:?ต้องกำหนด TAG}
+    environment:
+      PORT: 3000
+      STORE: postgres
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/todos
+      APP_VERSION: ${TAG}
+    ports:
+      - '80:3000'
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: always
+    # rolling update อย่างง่ายด้วย compose: ยกตัวใหม่ก่อนค่อยดับตัวเก่า
+    deploy:
+      replicas: 1
+      update_config:
+        order: start-first
+
+volumes:
+  pgdata:

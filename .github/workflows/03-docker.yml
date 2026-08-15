@@ -1,0 +1,120 @@
+# =============================================================================
+# LAB 3 — Build Docker image, สแกนความปลอดภัย และ push ขึ้น GitHub Container Registry
+# เป้าหมาย: เข้าใจ "artifact ที่ deploy จริง" คือ image ที่ถูกสร้าง "ครั้งเดียว"
+#           แล้วนำไปใช้ทุก environment (build once, deploy many)
+# =============================================================================
+
+name: 03 - Build & Push Image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*'] # เมื่อติด tag เช่น v1.2.3 จะได้ image tag ตามเวอร์ชัน
+  pull_request:
+    branches: [main] # PR จะ build อย่างเดียว ไม่ push (กันคนนอกดัน image แปลกปลอม)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write # จำเป็นสำหรับ push ขึ้น ghcr.io
+  security-events: write # จำเป็นสำหรับอัปโหลดผลสแกนเข้า Security tab
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }} # เช่น username/devops-lab-todo-api
+
+jobs:
+  build-and-push:
+    name: Build / Scan / Push
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+      digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # Buildx = build engine รุ่นใหม่ รองรับ cache และ multi-platform
+      - name: ตั้งค่า Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # ล็อกอินเข้า registry — ทำเฉพาะตอนที่จะ push จริง
+      - name: ล็อกอิน GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }} # โทเคนอัตโนมัติ ไม่ต้องสร้างเอง
+
+      # สร้างชื่อ tag และ label ให้อัตโนมัติตามเหตุการณ์ที่ทริกเกอร์
+      - name: เตรียม metadata (tags/labels)
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # ---- ขั้นทดสอบภายใน image (stage "test" ใน Dockerfile) ----------------
+      # ถ้า lint/test ใน image ไม่ผ่าน จะหยุดที่ขั้นนี้เลย
+      - name: รัน test stage ใน Dockerfile
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: test
+          push: false
+          load: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ---- build image จริง ----------------------------------------------
+      - name: Build (และ push ถ้าไม่ใช่ PR)
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64 # เพิ่ม ,linux/arm64 ได้ถ้าต้องรองรับ Apple Silicon/Pi
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true # แนบหลักฐานที่มาของ image (supply chain security)
+          sbom: true # แนบรายการซอฟต์แวร์ที่อยู่ใน image
+
+      # ---- สแกนหาช่องโหว่ใน image ------------------------------------------
+      - name: สแกนด้วย Trivy
+        uses: aquasecurity/trivy-action@0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true # ไม่ฟ้องช่องโหว่ที่ยังไม่มี patch ให้แก้
+          exit-code: '0' # ตอนเรียนตั้งเป็น 0 ก่อน; ของจริงควรตั้ง 1 เพื่อบล็อก
+
+      - name: อัปโหลดผลสแกนเข้า Security tab
+        if: always() && github.event_name != 'pull_request'
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: สรุปผล
+        run: |
+          {
+            echo "## Image ที่สร้างได้"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo "digest: \`${{ steps.build.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,24 @@
+# ให้ Dependabot เปิด PR อัปเดต dependency ให้อัตโนมัติ
+# เป็นการ "ปิดวงจร" ของ CI: มี PR เข้ามา -> CI รันเอง -> ถ้าเขียวก็ merge ได้เลย
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: '/'
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      dev-dependencies:
+        dependency-type: development
+
+  # อัปเดตเวอร์ชันของ action ในไฟล์ workflow ด้วย
+  - package-ecosystem: github-actions
+    directory: '/'
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: '/'
+    schedule:
+      interval: weekly

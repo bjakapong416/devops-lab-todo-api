@@ -1,0 +1,150 @@
+# =============================================================================
+# LAB 4 — Continuous Deployment
+# เป้าหมาย: deploy image ที่ผ่าน CI ไปยัง staging อัตโนมัติ
+#           และไป production เมื่อได้รับ "การอนุมัติจากมนุษย์" (manual approval)
+#
+# ต้องตั้งค่าใน repo ก่อน:
+#   Settings > Environments > staging / production
+#     - production: เปิด "Required reviewers"
+#   Secrets ที่ต้องมีในแต่ละ environment:
+#     SSH_HOST, SSH_USER, SSH_PRIVATE_KEY
+# =============================================================================
+
+name: 04 - CD
+
+on:
+  # ทริกเกอร์ต่อจาก workflow build เมื่อสำเร็จ (chaining)
+  workflow_run:
+    workflows: ['03 - Build & Push Image']
+    types: [completed]
+    branches: [main]
+
+  # หรือสั่ง deploy เองพร้อมระบุ tag (ใช้ตอน rollback ก็ได้)
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'image tag ที่ต้องการ deploy (เช่น sha-a1b2c3d หรือ 1.2.3)'
+        required: true
+      target:
+        description: 'ปลายทาง'
+        type: choice
+        options: [staging, production]
+        default: staging
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: cd-${{ github.event.inputs.target || 'staging' }}
+  cancel-in-progress: false # ห้ามยกเลิกกลางคัน! การ deploy ต้องจบให้สมบูรณ์
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # ตัดสินใจว่าจะ deploy อะไร
+  # ---------------------------------------------------------------------------
+  prepare:
+    name: เตรียมข้อมูล deploy
+    runs-on: ubuntu-latest
+    # กรณีมาจาก workflow_run ต้องเช็คว่า workflow ต้นทางสำเร็จจริง
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    outputs:
+      image_tag: ${{ steps.decide.outputs.image_tag }}
+      target: ${{ steps.decide.outputs.target }}
+    steps:
+      - id: decide
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "image_tag=${{ inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+            echo "target=${{ inputs.target }}"       >> "$GITHUB_OUTPUT"
+          else
+            echo "image_tag=sha-$(echo ${{ github.event.workflow_run.head_sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+            echo "target=staging" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Deploy ไป staging — อัตโนมัติ ไม่ต้องขออนุมัติ
+  # ---------------------------------------------------------------------------
+  deploy-staging:
+    name: Deploy → staging
+    needs: prepare
+    if: needs.prepare.outputs.target == 'staging'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: staging
+      url: https://staging.example.ac.th # แสดงลิงก์บนหน้า Deployments
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: ติดตั้ง SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: ส่งไฟล์ deploy ขึ้นเซิร์ฟเวอร์
+        run: |
+          scp -i ~/.ssh/id_ed25519 \
+            deploy/docker-compose.prod.yml deploy/deploy.sh scripts/smoke-test.sh \
+            "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/opt/todo-api/"
+
+      - name: สั่ง deploy บนเซิร์ฟเวอร์
+        run: |
+          ssh -i ~/.ssh/id_ed25519 "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" \
+            "cd /opt/todo-api && chmod +x deploy.sh smoke-test.sh && ./deploy.sh '${{ needs.prepare.outputs.image_tag }}'"
+
+      - name: ลบ SSH key ทิ้ง
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519
+
+  # ---------------------------------------------------------------------------
+  # Deploy ไป production — ต้องมีคนกดอนุมัติก่อน (ตั้งใน Environment protection rules)
+  # ---------------------------------------------------------------------------
+  deploy-production:
+    name: Deploy → production (รออนุมัติ)
+    needs: prepare
+    if: needs.prepare.outputs.target == 'production'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: https://todo.example.ac.th
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: ติดตั้ง SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: deploy + smoke test + auto rollback
+        run: |
+          scp -i ~/.ssh/id_ed25519 \
+            deploy/docker-compose.prod.yml deploy/deploy.sh scripts/smoke-test.sh \
+            "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/opt/todo-api/"
+          ssh -i ~/.ssh/id_ed25519 "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" \
+            "cd /opt/todo-api && chmod +x deploy.sh smoke-test.sh && ./deploy.sh '${{ needs.prepare.outputs.image_tag }}'"
+
+      - name: ลบ SSH key ทิ้ง
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519
+
+  # ---------------------------------------------------------------------------
+  # แจ้งผลลัพธ์ (ในของจริงมักส่งเข้า Slack / Discord / LINE Notify)
+  # ---------------------------------------------------------------------------
+  notify:
+    name: แจ้งผล
+    runs-on: ubuntu-latest
+    needs: [prepare, deploy-staging, deploy-production]
+    if: always() && needs.prepare.result == 'success'
+    steps:
+      - run: |
+          echo "tag        : ${{ needs.prepare.outputs.image_tag }}"
+          echo "staging    : ${{ needs.deploy-staging.result }}"
+          echo "production : ${{ needs.deploy-production.result }}"

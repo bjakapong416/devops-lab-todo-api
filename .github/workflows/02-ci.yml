@@ -1,0 +1,170 @@
+# =============================================================================
+# LAB 2 — CI Pipeline ที่ใช้งานจริง
+# เป้าหมาย: lint -> unit test (หลายเวอร์ชัน Node) -> integration test (มี DB จริง)
+#           พร้อม cache, artifact, concurrency, และ job สรุปผลสำหรับ branch protection
+# =============================================================================
+
+name: 02 - CI
+
+on:
+  push:
+    branches: [main, 'feature/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# ยกเลิกการรันเก่าของ branch เดียวกันเมื่อมี push ใหม่เข้ามา
+# ช่วยประหยัดโควตา runner และได้ผลลัพธ์เร็วขึ้น
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION_DEFAULT: '22'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # STAGE 1: ตรวจคุณภาพโค้ดแบบไม่ต้องรันโปรแกรม (static analysis) — เร็วที่สุด
+  # ---------------------------------------------------------------------------
+  lint:
+    name: ตรวจสไตล์โค้ด
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: ติดตั้ง Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION_DEFAULT }}
+          cache: npm # cache โฟลเดอร์ ~/.npm ให้อัตโนมัติ (อ่าน key จาก package-lock.json)
+
+      # npm ci ≠ npm install
+      #   ci  = ลบ node_modules ทิ้งแล้วติดตั้งตาม package-lock.json เป๊ะ ๆ (ทำซ้ำได้)
+      #   install = อาจอัปเดต lock file ทำให้ผลลัพธ์ต่างกันในแต่ละครั้ง
+      - run: npm ci
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: ตรวจการจัดรูปแบบด้วย Prettier
+        run: npm run format:check
+
+  # ---------------------------------------------------------------------------
+  # STAGE 2: Unit test หลายเวอร์ชัน Node พร้อมกัน (build matrix)
+  # ---------------------------------------------------------------------------
+  unit-test:
+    name: Unit test (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false # ให้ช่องอื่นรันต่อแม้ช่องหนึ่งพัง จะได้เห็นภาพรวม
+      matrix:
+        node: ['20', '22', '24']
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: รัน unit test พร้อมวัด coverage
+        run: npm run test:coverage
+
+      # เก็บผลลัพธ์ไว้ดาวน์โหลดจากหน้า run — ใช้ตอนดีบักว่าทำไมถึงพัง
+      - name: อัปโหลดรายงาน coverage
+        if: always() # อัปโหลดแม้เทสต์จะไม่ผ่าน
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-node-${{ matrix.node }}
+          path: coverage/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # STAGE 3: Integration test — ยก PostgreSQL จริงขึ้นมาเป็น service container
+  # ---------------------------------------------------------------------------
+  integration-test:
+    name: Integration test (PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [lint] # ไม่ต้องเสียเวลายก DB ถ้าโค้ดยังไม่ผ่าน lint
+
+    # service container = คอนเทนเนอร์เสริมที่ GitHub ยกขึ้นมาให้ในเน็ตเวิร์กเดียวกับ job
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: todos
+        ports:
+          - 5432:5432
+        # ต้องมี health check ไม่งั้น job จะเริ่มรันก่อน DB พร้อม แล้วพังแบบสุ่ม (flaky)
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      STORE: postgres
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/todos
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION_DEFAULT }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: รัน integration test
+        run: npm run test:integration
+
+  # ---------------------------------------------------------------------------
+  # STAGE 4: ตรวจช่องโหว่ของ dependency
+  # ---------------------------------------------------------------------------
+  audit:
+    name: ตรวจช่องโหว่ dependency
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION_DEFAULT }}
+          cache: npm
+      - run: npm ci
+      - name: npm audit (ระดับ high ขึ้นไปถือว่าไม่ผ่าน)
+        run: npm audit --audit-level=high
+
+  # ---------------------------------------------------------------------------
+  # GATE: job เดียวที่เอาไว้ผูกกับ Branch Protection Rule
+  # ข้อดี: เวลาเพิ่ม/ลบ job ในอนาคต ไม่ต้องไปแก้การตั้งค่าใน GitHub ทุกครั้ง
+  # ---------------------------------------------------------------------------
+  ci-passed:
+    name: CI ผ่านทั้งหมด
+    runs-on: ubuntu-latest
+    needs: [lint, unit-test, integration-test, audit]
+    if: always()
+    steps:
+      - name: ตรวจผลรวมของทุก job
+        run: |
+          results='${{ join(needs.*.result, ' ') }}'
+          echo "ผลลัพธ์ทุก job: ${results}"
+          for r in ${results}; do
+            if [ "$r" != "success" ]; then
+              echo "::error::มี job ที่ไม่สำเร็จ (${r})"
+              exit 1
+            fi
+          done
+          echo "ทุก job ผ่านเรียบร้อย ✅"
